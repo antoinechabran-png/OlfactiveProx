@@ -82,9 +82,13 @@ if df is not None:
     # --- TAB 1: Olfactive Landscape ---
     with tab1:
         st.header("1. Visualizing the Olfactive Landscape")
-        st.markdown("Explore how fragrances are positioned in 2D space based on their olfactive profiles.")
+        st.markdown("Explore how fragrances are positioned in 2D space and detect high-density hubs vs. unserved **white spaces**.")
         
-        method = st.selectbox("Select Dimensionality Reduction Method:", ["PCA", "t-SNE"])
+        col_m1, col_m2 = st.columns([1, 1])
+        with col_m1:
+            method = st.selectbox("Select Dimensionality Reduction Method:", ["PCA", "t-SNE"])
+        with col_m2:
+            show_density = st.checkbox("🔥 Overlay Territory Density Heatmap (White Space Detector)", value=True)
         
         if method == "PCA":
             reducer = PCA(n_components=2)
@@ -101,13 +105,64 @@ if df is not None:
         viz_df = pd.DataFrame(coords, columns=["Dim 1", "Dim 2"], index=df.index).reset_index()
         viz_df["Top Notes"] = top_notes_series.values
         
-        fig = px.scatter(
-            viz_df, x="Dim 1", y="Dim 2", hover_name=df.index.name,
-            hover_data={"Top Notes": True, "Dim 1": ":.2f", "Dim 2": ":.2f"},
-            title=f"2D Landscape using {method}"
-        )
-        fig.update_traces(marker=dict(size=9, opacity=0.8))
+        if show_density:
+            # Combined Density Heatmap + Scatter Plot
+            fig = go.Figure()
+            
+            # 2D Density Contour Layer (White Space Layer)
+            fig.add_trace(go.Histogram2dContour(
+                x=viz_df["Dim 1"],
+                y=viz_df["Dim 2"],
+                colorscale="YlOrRd",
+                reversescale=False,
+                showscale=True,
+                name="Density",
+                contours=dict(coloring='heatmap', showlines=True),
+                opacity=0.6,
+                colorbar=dict(title="SKU Density")
+            ))
+            
+            # Scatter Overlay for Fragrances
+            hover_text = [
+                f"<b>{row[df.index.name]}</b><br>Top Notes: {row['Top Notes']}" 
+                for _, row in viz_df.iterrows()
+            ]
+            
+            fig.add_trace(go.Scatter(
+                x=viz_df["Dim 1"],
+                y=viz_df["Dim 2"],
+                mode='markers+text',
+                text=viz_df[df.index.name],
+                textposition="top center",
+                marker=dict(size=9, color='black', line=dict(width=1, color='white')),
+                hoverinfo='text',
+                hovertext=hover_text,
+                name='Fragrances'
+            ))
+            
+            fig.update_layout(
+                title=f"2D Olfactive Territory Density Heatmap ({method})",
+                xaxis_title="Dim 1",
+                yaxis_title="Dim 2",
+                hovermode='closest'
+            )
+        else:
+            # Standard Scatter Plot
+            fig = px.scatter(
+                viz_df, x="Dim 1", y="Dim 2", hover_name=df.index.name,
+                hover_data={"Top Notes": True, "Dim 1": ":.2f", "Dim 2": ":.2f"},
+                title=f"2D Olfactive Landscape using {method}"
+            )
+            fig.update_traces(marker=dict(size=9, opacity=0.8))
+
         st.plotly_chart(fig, use_container_width=True)
+
+        # Strategic Interpretation Guide
+        with st.expander("💡 How to Read the Territory Density Heatmap & Spot 'White Spaces'"):
+            st.markdown("""
+            * **🔥 Dark / Warm Density Hubs:** High concentration of existing SKUs. These zones present **cannibalization risks** and are prime candidates for product rationalization or consolidation.
+            * **⚪ Pale / Low-Density Zones:** **"White Spaces"** representing unserved or sparse olfactive profile combinations. These zones highlight **New Product Development (NPD) opportunities** for unique new launches.
+            """)
 
         if method == "PCA":
             with st.expander("🔍 What is driving these axes? (PCA Feature Importance)"):
