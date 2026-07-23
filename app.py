@@ -40,6 +40,17 @@ def get_top_notes_str(row, top_k=3):
         return "None"
     return ", ".join([f"{note}: {val:.1f}" for note, val in top.items()])
 
+def classify_proximity(score):
+    """Categorizes raw similarity score into strategic portfolio action tiers."""
+    if score >= 0.80:
+        return "🟩 Direct Substitute"
+    elif score >= 0.65:
+        return "🟦 Strong Alternative"
+    elif score >= 0.50:
+        return "🟨 Sub-Family Neighbor"
+    else:
+        return "⬜ Distinct Territory"
+
 # --- Sidebar / Data Upload ---
 st.sidebar.header("Data Input")
 uploaded_file = st.sidebar.file_uploader("Upload ODNA Excel File", type=["xls", "xlsx"])
@@ -282,20 +293,56 @@ if df is not None:
     # --- TAB 4: Similarity Engine ---
     with tab4:
         st.header("4. Fragrance Similarity Engine")
-        st.markdown("Select a target fragrance to locate its closest alternatives and compare their olfactive profiles.")
+        st.markdown("Select a target fragrance to locate its closest alternatives and evaluate substitution feasibility.")
         
+        # Collapsible Tier Definition Reference Table
+        with st.expander("ℹ️ How to Interpret Olfactive Proximity Tiers"):
+            tier_guide_df = pd.DataFrame([
+                {
+                    "Tier Status": "🟩 Direct Substitute",
+                    "Score Range": "≥ 80%",
+                    "Match Level": "Near-Duplicate",
+                    "Strategic Action & Interpretation": "Prime rationalization candidate. Shared dominant notes in near-identical proportions; high confidence for SKU consolidation or formula replacement."
+                },
+                {
+                    "Tier Status": "🟦 Strong Alternative",
+                    "Score Range": "65% – 79%",
+                    "Match Level": "High Proximity",
+                    "Strategic Action & Interpretation": "Line variant / Reformulation candidate. Shares core family signature; suitable substitute requiring minor adjustment."
+                },
+                {
+                    "Tier Status": "🟨 Sub-Family Neighbor",
+                    "Score Range": "50% – 64%",
+                    "Match Level": "Moderate Match",
+                    "Strategic Action & Interpretation": "Cross-category bridge. Shares overarching framework, but features noticeably distinct top or bottom notes."
+                },
+                {
+                    "Tier Status": "⬜ Distinct Territory",
+                    "Score Range": "< 50%",
+                    "Match Level": "Low Proximity",
+                    "Strategic Action & Interpretation": "Distant profile. Unique space in portfolio; minimal risk of cannibalization."
+                }
+            ])
+            st.dataframe(tier_guide_df, hide_index=True, use_container_width=True)
+            
         target = st.selectbox("Select Target Fragrance:", df.index)
         top_n = st.number_input("Number of Alternatives to show:", min_value=1, max_value=20, value=5)
         
         if st.button("Find Alternatives"):
             target_sims = sim_df[target].drop(target).sort_values(ascending=False)
             top_alternatives = target_sims.head(top_n).reset_index()
-            top_alternatives.columns = ["Alternative Fragrance", "Proximity Score (0 to 1)"]
+            top_alternatives.columns = ["Alternative Fragrance", "Proximity Score"]
             
-            top_alternatives["Proximity Match"] = (top_alternatives["Proximity Score (0 to 1)"] * 100).round(2).astype(str) + "%"
+            # Apply tier classification and formatting
+            top_alternatives["Tier Status"] = top_alternatives["Proximity Score"].apply(classify_proximity)
+            top_alternatives["Proximity Match"] = (top_alternatives["Proximity Score"] * 100).round(1).astype(str) + "%"
             top_alternatives["Top Notes"] = top_alternatives["Alternative Fragrance"].map(top_notes_series)
             
-            st.dataframe(top_alternatives[["Alternative Fragrance", "Proximity Match", "Top Notes"]], hide_index=True, use_container_width=True)
+            st.dataframe(
+                top_alternatives[["Alternative Fragrance", "Tier Status", "Proximity Match", "Top Notes"]], 
+                hide_index=True, 
+                use_container_width=True
+            )
             
             # Olfactive profile comparison chart
             comp_df = df.loc[[target] + top_alternatives["Alternative Fragrance"].tolist()].T
