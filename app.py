@@ -33,6 +33,13 @@ def load_data(uploaded_file):
     df.fillna(0, inplace=True)
     return df
 
+def get_top_notes_str(row, top_k=3):
+    """Extract top_k non-zero descriptors for hover text."""
+    top = row[row > 0].nlargest(top_k)
+    if len(top) == 0:
+        return "None"
+    return ", ".join([f"{note}: {val:.1f}" for note, val in top.items()])
+
 # --- Sidebar / Data Upload ---
 st.sidebar.header("Data Input")
 uploaded_file = st.sidebar.file_uploader("Upload ODNA Excel File", type=["xls", "xlsx"])
@@ -41,6 +48,9 @@ df = load_data(uploaded_file)
 
 if df is not None:
     st.sidebar.success(f"Loaded {df.shape[0]} fragrances and {df.shape[1]} descriptors.")
+    
+    # Compute Top 3 dominant notes for every fragrance for rich tooltips
+    top_notes_series = df.apply(get_top_notes_str, axis=1)
     
     # Standardize/Normalize data
     scaler = StandardScaler()
@@ -61,53 +71,143 @@ if df is not None:
     # --- TAB 1: Olfactive Landscape ---
     with tab1:
         st.header("1. Visualizing the Olfactive Landscape")
+        st.markdown("Explore how fragrances are positioned in 2D space based on their olfactive profiles.")
+        
         method = st.selectbox("Select Dimensionality Reduction Method:", ["PCA", "t-SNE"])
         
         if method == "PCA":
             reducer = PCA(n_components=2)
+            coords = reducer.fit_transform(data_scaled)
+            
+            # Feature loadings to explain PCA axes
+            pc1_drivers = pd.Series(reducer.components_[0], index=df.columns).abs().nlargest(4)
+            pc2_drivers = pd.Series(reducer.components_[1], index=df.columns).abs().nlargest(4)
         else:
-            # Dynamic perplexity fix for smaller sample sizes
             safe_perplexity = min(30, max(1, len(df) - 1))
             reducer = TSNE(n_components=2, perplexity=safe_perplexity, random_state=42)
+            coords = reducer.fit_transform(data_scaled)
             
-        coords = reducer.fit_transform(data_scaled)
         viz_df = pd.DataFrame(coords, columns=["Dim 1", "Dim 2"], index=df.index).reset_index()
+        viz_df["Top Notes"] = top_notes_series.values
         
-        fig = px.scatter(viz_df, x="Dim 1", y="Dim 2", hover_name=df.index.name,
-                         title=f"2D Landscape using {method}")
+        fig = px.scatter(
+            viz_df, x="Dim 1", y="Dim 2", hover_name=df.index.name,
+            hover_data={"Top Notes": True, "Dim 1": ":.2f", "Dim 2": ":.2f"},
+            title=f"2D Landscape using {method}"
+        )
+        fig.update_traces(marker=dict(size=9, opacity=0.8))
         st.plotly_chart(fig, use_container_width=True)
+
+        if method == "PCA":
+            with st.expander("🔍 What is driving these axes? (PCA Feature Importance)"):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.write("**Top Drivers for Dimension 1 (Horizontal):**")
+                    st.write(", ".join(pc1_drivers.index))
+                with col_b:
+                    st.write("**Top Drivers for Dimension 2 (Vertical):**")
+                    st.write(", ".join(pc2_drivers.index))
 
     # --- TAB 2: Clusters & Heroes ---
     with tab2:
-        st.header("2. Objective Clustering & Heroes")
+        st.header("2. Objective Clustering & Olfactive Signatures")
+        st.markdown("Group fragrances into olfactive families, identify their dominant notes, and select cluster heroes.")
+        
         max_clusters = min(20, len(df))
         n_clusters = st.slider("Number of Clusters (Families):", min_value=2, max_value=max_clusters, value=min(8, max_clusters))
         
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         clusters = kmeans.fit_predict(data_scaled)
         
-        # Identify Heroes (closest to centroid)
+        # Identify Heroes (closest product to centroid)
         closest, _ = pairwise_distances_argmin_min(kmeans.cluster_centers_, data_scaled)
         heroes = df.index[closest].tolist()
         
-        cluster_df = pd.DataFrame({"Cluster": clusters}, index=df.index)
+        # Compute cluster average profiles
+        df_clustered = df.copy()
+        df_clustered["Cluster"] = clusters
+        cluster_means = df_clustered.groupby("Cluster").mean()
         
-        st.write("### Cluster Representatives (Heroes)")
-        hero_display = pd.DataFrame({"Cluster": range(n_clusters), "Hero Fragrance": heroes})
-        st.dataframe(hero_display, hide_index=True)
+        # Build Rich Cluster Summary Table
+        cluster_summary = []
+        for c_id in range(n_clusters):
+            c_size = (clusters == c_id).sum()
+            c_hero = heroes[c_id]
+            # Get top 4 dominant notes in cluster
+            top_c_notes = cluster_means.loc[c_id].nlargest(4)
+            sig_str = ", ".join([f"{k} ({v:.1f})" for k, v in top_c_notes.items() if v > 0])
+            
+            cluster_summary.append({
+                "Cluster ID": c_id,
+                "Size": c_size,
+                "Hero Fragrance": c_hero,
+                "Olfactive Signature (Dominant Notes)": sig_str
+            })
+            
+        summary_df = pd.DataFrame(cluster_summary)
+        
+        st.write("### Cluster Signatures & Representative Heroes")
+        st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
-        # Plot clusters on the same 2D landscape
+        # Plot clusters on the 2D landscape
         viz_df["Cluster"] = clusters.astype(str)
-        fig_clusters = px.scatter(viz_df, x="Dim 1", y="Dim 2", color="Cluster", hover_name=df.index.name,
-                                  title=f"Fragrance Clusters (k={n_clusters})")
+        fig_clusters = px.scatter(
+            viz_df, x="Dim 1", y="Dim 2", color="Cluster", hover_name=df.index.name,
+            hover_data={"Top Notes": True, "Cluster": True, "Dim 1": False, "Dim 2": False},
+            title=f"Fragrance Territory Clusters (k={n_clusters})"
+        )
+        fig_clusters.update_traces(marker=dict(size=9))
         
         # Add stars for heroes
         hero_coords = viz_df[viz_df[df.index.name].isin(heroes)]
-        fig_clusters.add_trace(go.Scatter(x=hero_coords["Dim 1"], y=hero_coords["Dim 2"],
-                                          mode='markers', marker=dict(symbol='star', size=15, color='black'),
-                                          name='Heroes', hovertext=hero_coords[df.index.name]))
+        fig_clusters.add_trace(go.Scatter(
+            x=hero_coords["Dim 1"], y=hero_coords["Dim 2"],
+            mode='markers+text',
+            marker=dict(symbol='star', size=16, color='black', line=dict(width=1, color='white')),
+            text=hero_coords[df.index.name],
+            textposition="top center",
+            name='Heroes',
+            hovertext=hero_coords["Top Notes"]
+        ))
         
         st.plotly_chart(fig_clusters, use_container_width=True)
+
+        # --- Interactive Cluster Inspector ---
+        st.subheader("📊 Deep Dive: Cluster Olfactive Fingerprint")
+        selected_c = st.selectbox("Select a Cluster to inspect:", range(n_clusters), format_func=lambda x: f"Cluster {x} (Hero: {heroes[x]})")
+        
+        c_col1, c_col2 = st.columns([1, 1])
+        
+        with c_col1:
+            # Radar chart of top 6 notes for this cluster vs overall average
+            top_6_notes = cluster_means.loc[selected_c].nlargest(6)
+            overall_means = df.mean()[top_6_notes.index]
+            
+            fig_radar = go.Figure()
+            fig_radar.add_trace(go.Scatterpolar(
+                r=top_6_notes.values, theta=top_6_notes.index, fill='toself', name=f'Cluster {selected_c}'
+            ))
+            fig_radar.add_trace(go.Scatterpolar(
+                r=overall_means.values, theta=overall_means.index, fill='toself', name='Portfolio Average', opacity=0.5
+            ))
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True)),
+                title=f"Olfactive Fingerprint: Cluster {selected_c}"
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+            
+        with c_col2:
+            st.write(f"**Fragrances in Cluster {selected_c}:**")
+            member_fragrances = df_clustered[df_clustered["Cluster"] == selected_c].index.tolist()
+            
+            member_details = []
+            for frag in member_fragrances:
+                member_details.append({
+                    "Fragrance": frag,
+                    "Is Hero": "⭐ Yes" if frag == heroes[selected_c] else "No",
+                    "Top Notes": top_notes_series[frag]
+                })
+            st.dataframe(pd.DataFrame(member_details), hide_index=True, use_container_width=True)
 
     # --- TAB 3: Network Map (Substitution Pathways) ---
     with tab3:
@@ -120,23 +220,19 @@ if df is not None:
         # Build NetworkX Graph
         G = nx.Graph()
         
-        # Add nodes
         for node in df.index:
             G.add_node(node)
             
-        # Add edges based on threshold
         for i in range(len(df.index)):
             for j in range(i+1, len(df.index)):
                 sim = sim_matrix[i, j]
                 if sim >= threshold:
                     G.add_edge(df.index[i], df.index[j], weight=sim)
                     
-        # Calculate layout
         pos = nx.spring_layout(G, seed=42)
         
-        # Plotly Network edges
-        edge_x = []
-        edge_y = []
+        # Edges
+        edge_x, edge_y = [], []
         for edge in G.edges():
             x0, y0 = pos[edge[0]]
             x1, y1 = pos[edge[1]]
@@ -145,28 +241,25 @@ if df is not None:
             
         edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none', mode='lines')
         
-        # Plotly Network nodes
-        node_x = []
-        node_y = []
-        node_text = []
-        node_adjacencies = []
+        # Nodes
+        node_x, node_y, node_hover, node_adjacencies = [], [], [], []
         
         for node in G.nodes():
             x, y = pos[node]
             node_x.append(x)
             node_y.append(y)
-            node_text.append(str(node))
-            node_adjacencies.append(len(list(G.neighbors(node))))
+            n_conn = len(list(G.neighbors(node)))
+            node_adjacencies.append(n_conn)
+            node_hover.append(f"<b>{node}</b><br>Connections: {n_conn}<br>Top Notes: {top_notes_series[node]}")
             
-        # Fixed Plotly marker colorbar dictionary formatting
         node_trace = go.Scatter(
-            x=node_x, y=node_y, mode='markers', hoverinfo='text',
+            x=node_x, y=node_y, mode='markers', hoverinfo='text', hovertext=node_hover,
             marker=dict(
                 showscale=True,
                 colorscale='YlGnBu',
                 reversescale=True,
                 color=node_adjacencies,
-                size=10, 
+                size=12, 
                 colorbar=dict(
                     thickness=15,
                     title=dict(text='Number of Connections', side='right'),
@@ -174,7 +267,6 @@ if df is not None:
                 )
             )
         )
-        node_trace.text = node_text
         
         fig_net = go.Figure(
             data=[edge_trace, node_trace],
@@ -190,26 +282,24 @@ if df is not None:
     # --- TAB 4: Similarity Engine ---
     with tab4:
         st.header("4. Fragrance Similarity Engine")
-        st.markdown("Select a fragrance to find its closest olfactive alternatives.")
+        st.markdown("Select a target fragrance to locate its closest alternatives and compare their olfactive profiles.")
         
         target = st.selectbox("Select Target Fragrance:", df.index)
         top_n = st.number_input("Number of Alternatives to show:", min_value=1, max_value=20, value=5)
         
         if st.button("Find Alternatives"):
-            # Get target similarities, drop the target itself, and sort
             target_sims = sim_df[target].drop(target).sort_values(ascending=False)
-            
             top_alternatives = target_sims.head(top_n).reset_index()
             top_alternatives.columns = ["Alternative Fragrance", "Proximity Score (0 to 1)"]
             
-            # Format score as a percentage for readability
             top_alternatives["Proximity Match"] = (top_alternatives["Proximity Score (0 to 1)"] * 100).round(2).astype(str) + "%"
+            top_alternatives["Top Notes"] = top_alternatives["Alternative Fragrance"].map(top_notes_series)
             
-            st.dataframe(top_alternatives[["Alternative Fragrance", "Proximity Match"]], hide_index=True)
+            st.dataframe(top_alternatives[["Alternative Fragrance", "Proximity Match", "Top Notes"]], hide_index=True, use_container_width=True)
             
-            # Show the olfactive profile comparison chart
+            # Olfactive profile comparison chart
             comp_df = df.loc[[target] + top_alternatives["Alternative Fragrance"].tolist()].T
-            comp_df = comp_df.loc[(comp_df != 0).any(axis=1)] # drop empty rows for cleaner chart
+            comp_df = comp_df.loc[(comp_df != 0).any(axis=1)] # Filter non-zero descriptors
             
             st.write("### Olfactive Profile Comparison")
             st.line_chart(comp_df)
