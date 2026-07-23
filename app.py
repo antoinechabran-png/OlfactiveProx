@@ -9,6 +9,7 @@ from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import pairwise_distances_argmin_min
+from sklearn.preprocessing import StandardScaler
 
 # --- Page Config ---
 st.set_page_config(page_title="Fragrance Portfolio Rationalizer", layout="wide")
@@ -23,7 +24,7 @@ def load_data(uploaded_file):
         # Fallback to local file if it exists in the directory
         try:
             df = pd.read_excel("Example ODNA.xls")
-        except:
+        except Exception:
             return None
     
     # Assuming Column A is 'Product' and the rest are descriptors
@@ -42,7 +43,6 @@ if df is not None:
     st.sidebar.success(f"Loaded {df.shape[0]} fragrances and {df.shape[1]} descriptors.")
     
     # Standardize/Normalize data
-    from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler()
     data_scaled = scaler.fit_transform(df)
     
@@ -66,7 +66,9 @@ if df is not None:
         if method == "PCA":
             reducer = PCA(n_components=2)
         else:
-            reducer = TSNE(n_components=2, perplexity=30, random_state=42)
+            # Dynamic perplexity fix for smaller sample sizes
+            safe_perplexity = min(30, max(1, len(df) - 1))
+            reducer = TSNE(n_components=2, perplexity=safe_perplexity, random_state=42)
             
         coords = reducer.fit_transform(data_scaled)
         viz_df = pd.DataFrame(coords, columns=["Dim 1", "Dim 2"], index=df.index).reset_index()
@@ -78,7 +80,8 @@ if df is not None:
     # --- TAB 2: Clusters & Heroes ---
     with tab2:
         st.header("2. Objective Clustering & Heroes")
-        n_clusters = st.slider("Number of Clusters (Families):", min_value=2, max_value=20, value=8)
+        max_clusters = min(20, len(df))
+        n_clusters = st.slider("Number of Clusters (Families):", min_value=2, max_value=max_clusters, value=min(8, max_clusters))
         
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         clusters = kmeans.fit_predict(data_scaled)
@@ -155,16 +158,32 @@ if df is not None:
             node_text.append(str(node))
             node_adjacencies.append(len(list(G.neighbors(node))))
             
-        node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', hoverinfo='text',
-                                marker=dict(showscale=True, colorscale='YlGnBu', reversescale=True,
-                                            color=node_adjacencies, size=10, 
-                                            colorbar=dict(thickness=15, title='Number of Connections', xanchor='left', titleside='right')))
+        # Fixed Plotly marker colorbar dictionary formatting
+        node_trace = go.Scatter(
+            x=node_x, y=node_y, mode='markers', hoverinfo='text',
+            marker=dict(
+                showscale=True,
+                colorscale='YlGnBu',
+                reversescale=True,
+                color=node_adjacencies,
+                size=10, 
+                colorbar=dict(
+                    thickness=15,
+                    title=dict(text='Number of Connections', side='right'),
+                    xanchor='left'
+                )
+            )
+        )
         node_trace.text = node_text
         
-        fig_net = go.Figure(data=[edge_trace, node_trace],
-                            layout=go.Layout(showlegend=False, hovermode='closest', margin=dict(b=20,l=5,r=5,t=40),
-                                             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                                             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
+        fig_net = go.Figure(
+            data=[edge_trace, node_trace],
+            layout=go.Layout(
+                showlegend=False, hovermode='closest', margin=dict(b=20, l=5, r=5, t=40),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+            )
+        )
         
         st.plotly_chart(fig_net, use_container_width=True)
 
@@ -188,7 +207,7 @@ if df is not None:
             
             st.dataframe(top_alternatives[["Alternative Fragrance", "Proximity Match"]], hide_index=True)
             
-            # Optional: Show the olfactive profile comparison chart
+            # Show the olfactive profile comparison chart
             comp_df = df.loc[[target] + top_alternatives["Alternative Fragrance"].tolist()].T
             comp_df = comp_df.loc[(comp_df != 0).any(axis=1)] # drop empty rows for cleaner chart
             
