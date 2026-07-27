@@ -15,26 +15,87 @@ from sklearn.preprocessing import StandardScaler
 st.set_page_config(page_title="Fragrance Portfolio Rationalizer", layout="wide")
 st.title("🌸 Fragrance Portfolio Rationalization & Network Analysis")
 
-# --- Helper Functions ---
+# --- Helper & Data Loading Functions ---
 @st.cache_data
 def load_data(uploaded_file):
+    """
+    Loads input Excel workbook with 2 tabs: Characterizer & Family.
+    Column A: Random Code
+    Column B: Group Code
+    Column C: Brand Name
+    Column D: Fantasy Name
+    Columns E to CN: Characterizer descriptors for mathematical modeling.
+    """
     if uploaded_file is not None:
-        df = pd.read_excel(uploaded_file)
+        file_source = uploaded_file
     else:
-        # Fallback to local file if it exists in the directory
+        # Fallback local files
         try:
-            df = pd.read_excel("Example ODNA.xls")
+            file_source = "ODNA VICTOR PORTFOLIO.xlsx"
+            xls = pd.ExcelFile(file_source)
         except Exception:
-            return None
+            try:
+                file_source = "Example ODNA.xls"
+                xls = pd.ExcelFile(file_source)
+            except Exception:
+                return None, None, None, None, None, None
+
+    xls = pd.ExcelFile(file_source)
+    sheet_names = xls.sheet_names
+
+    # Identify sheets based on name patterns
+    char_sheet, fam_sheet = None, None
+    for name in sheet_names:
+        lname = name.lower()
+        if "char" in lname:
+            char_sheet = name
+        elif "fam" in lname:
+            fam_sheet = name
+
+    if char_sheet is None:
+        char_sheet = sheet_names[0]
+    if fam_sheet is None and len(sheet_names) > 1:
+        fam_sheet = sheet_names[1]
+
+    # 1. Read Characterizers Sheet
+    df_char = pd.read_excel(xls, sheet_name=char_sheet)
     
-    # Assuming Column A is 'Product' and the rest are descriptors
-    product_col = df.columns[0]
-    df.set_index(product_col, inplace=True)
-    df.fillna(0, inplace=True)
-    return df
+    col_a_code = df_char.columns[0]      # Random Code
+    col_b_group = df_char.columns[1]     # Group Code
+    col_c_brand = df_char.columns[2]     # Brand Name
+    col_d_fantasy = df_char.columns[3]   # Fantasy Name
+    
+    # Extract Characterizer features from Column E (index 4) onwards
+    feature_cols = df_char.columns[4:].tolist()
+    
+    # Feature Dataframe (Numerical matrix for analysis)
+    df_feat = df_char.set_index(col_a_code)[feature_cols].fillna(0)
+    
+    # Metadata Dataframe
+    df_meta = df_char[[col_a_code, col_b_group, col_c_brand, col_d_fantasy]].copy()
+    df_meta.set_index(col_a_code, inplace=True)
+
+    # 2. Compute ODNA Family from Family Sheet
+    if fam_sheet and fam_sheet in xls.sheet_names:
+        df_fam = pd.read_excel(xls, sheet_name=fam_sheet)
+        fam_code_col = df_fam.columns[0]
+        fam_desc_cols = df_fam.columns[4:]  # Family columns starting at Col E
+        
+        fam_matrix = df_fam.set_index(fam_code_col)[fam_desc_cols].fillna(0)
+        
+        # Row-wise argmax to get the main family
+        has_family = fam_matrix.sum(axis=1) > 0
+        odna_series = pd.Series("Unclassified", index=fam_matrix.index)
+        odna_series[has_family] = fam_matrix[has_family].idxmax(axis=1)
+        
+        df_meta["ODNA Family"] = df_meta.index.map(odna_series).fillna("Unclassified")
+    else:
+        df_meta["ODNA Family"] = "Unclassified"
+
+    return df_feat, df_meta, col_a_code, col_b_group, col_c_brand, col_d_fantasy
 
 def get_top_notes_str(row, top_k=3):
-    """Extract top_k non-zero descriptors for hover text."""
+    """Extract top_k non-zero characterizer descriptors for hover text."""
     top = row[row > 0].nlargest(top_k)
     if len(top) == 0:
         return "None"
@@ -53,23 +114,23 @@ def classify_proximity(score):
 
 # --- Sidebar / Data Upload ---
 st.sidebar.header("Data Input")
-uploaded_file = st.sidebar.file_uploader("Upload ODNA Excel File", type=["xls", "xlsx"])
+uploaded_file = st.sidebar.file_uploader("Upload ODNA Excel File (Multi-Tab)", type=["xls", "xlsx"])
 
-df = load_data(uploaded_file)
+df_feat, df_meta, col_a, col_b, col_c, col_d = load_data(uploaded_file)
 
-if df is not None:
-    st.sidebar.success(f"Loaded {df.shape[0]} fragrances and {df.shape[1]} descriptors.")
+if df_feat is not None:
+    st.sidebar.success(f"Loaded {df_feat.shape[0]} fragrances with {df_feat.shape[1]} characterizers.")
     
-    # Compute Top 3 dominant notes for every fragrance for rich tooltips
-    top_notes_series = df.apply(get_top_notes_str, axis=1)
+    # Top notes summary for each fragrance
+    top_notes_series = df_feat.apply(get_top_notes_str, axis=1)
     
-    # Standardize/Normalize data
+    # Standardize data for PCA/t-SNE/KMeans
     scaler = StandardScaler()
-    data_scaled = scaler.fit_transform(df)
+    data_scaled = scaler.fit_transform(df_feat)
     
-    # Similarity Matrix (Cosine)
-    sim_matrix = cosine_similarity(df)
-    sim_df = pd.DataFrame(sim_matrix, index=df.index, columns=df.index)
+    # Cosine Similarity Matrix
+    sim_matrix = cosine_similarity(df_feat)
+    sim_df = pd.DataFrame(sim_matrix, index=df_feat.index, columns=df_feat.index)
 
     # --- UI TABS ---
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -79,10 +140,12 @@ if df is not None:
         "Similarity Engine"
     ])
 
-    # --- TAB 1: Olfactive Landscape ---
+    # =========================================================================
+    # --- TAB 1: Visualizing the Olfactive Landscape ---
+    # =========================================================================
     with tab1:
         st.header("1. Visualizing the Olfactive Landscape")
-        st.markdown("Explore how fragrances are positioned in 2D space and detect high-density hubs vs. unserved **white spaces**.")
+        st.markdown("Explore fragrance positioning in 2D space. Map display strictly showcases **Random Codes**.")
         
         col_m1, col_m2 = st.columns([1, 1])
         with col_m1:
@@ -93,23 +156,23 @@ if df is not None:
         if method == "PCA":
             reducer = PCA(n_components=2)
             coords = reducer.fit_transform(data_scaled)
-            
-            # Feature loadings to explain PCA axes
-            pc1_drivers = pd.Series(reducer.components_[0], index=df.columns).abs().nlargest(4)
-            pc2_drivers = pd.Series(reducer.components_[1], index=df.columns).abs().nlargest(4)
+            pc1_drivers = pd.Series(reducer.components_[0], index=df_feat.columns).abs().nlargest(4)
+            pc2_drivers = pd.Series(reducer.components_[1], index=df_feat.columns).abs().nlargest(4)
         else:
-            safe_perplexity = min(30, max(1, len(df) - 1))
+            safe_perplexity = min(30, max(1, len(df_feat) - 1))
             reducer = TSNE(n_components=2, perplexity=safe_perplexity, random_state=42)
             coords = reducer.fit_transform(data_scaled)
             
-        viz_df = pd.DataFrame(coords, columns=["Dim 1", "Dim 2"], index=df.index).reset_index()
+        viz_df = pd.DataFrame(coords, columns=["Dim 1", "Dim 2"], index=df_feat.index).reset_index()
         viz_df["Top Notes"] = top_notes_series.values
+        viz_df["Fantasy Name"] = viz_df[col_a].map(df_meta[col_d])
+        viz_df["Brand Name"] = viz_df[col_a].map(df_meta[col_c])
+        viz_df["ODNA Family"] = viz_df[col_a].map(df_meta["ODNA Family"])
         
         if show_density:
-            # Combined Density Heatmap + Scatter Plot
             fig = go.Figure()
             
-            # 2D Density Contour Layer (White Space Layer)
+            # Density Contour Layer
             fig.add_trace(go.Histogram2dContour(
                 x=viz_df["Dim 1"],
                 y=viz_df["Dim 2"],
@@ -122,17 +185,18 @@ if df is not None:
                 colorbar=dict(title="SKU Density")
             ))
             
-            # Scatter Overlay for Fragrances
+            # Hover text details
             hover_text = [
-                f"<b>{row[df.index.name]}</b><br>Top Notes: {row['Top Notes']}" 
+                f"<b>Code: {row[col_a]}</b><br>Name: {row['Fantasy Name']}<br>Brand: {row['Brand Name']}<br>Family: {row['ODNA Family']}<br>Top Notes: {row['Top Notes']}" 
                 for _, row in viz_df.iterrows()
             ]
             
+            # Show ONLY Random Codes on Map Labels
             fig.add_trace(go.Scatter(
                 x=viz_df["Dim 1"],
                 y=viz_df["Dim 2"],
                 mode='markers+text',
-                text=viz_df[df.index.name],
+                text=viz_df[col_a],  # ONLY Random Code displayed
                 textposition="top center",
                 marker=dict(size=9, color='black', line=dict(width=1, color='white')),
                 hoverinfo='text',
@@ -142,112 +206,114 @@ if df is not None:
             
             fig.update_layout(
                 title=f"2D Olfactive Territory Density Heatmap ({method})",
-                xaxis_title="Dim 1",
-                yaxis_title="Dim 2",
+                xaxis_title="Dim 1", yaxis_title="Dim 2",
                 hovermode='closest'
             )
         else:
-            # Standard Scatter Plot
             fig = px.scatter(
-                viz_df, x="Dim 1", y="Dim 2", hover_name=df.index.name,
-                hover_data={"Top Notes": True, "Dim 1": ":.2f", "Dim 2": ":.2f"},
+                viz_df, x="Dim 1", y="Dim 2", text=col_a,
+                hover_data={"Dim 1": ":.2f", "Dim 2": ":.2f", "Fantasy Name": True, "Brand Name": True, "ODNA Family": True, "Top Notes": True},
                 title=f"2D Olfactive Landscape using {method}"
             )
-            fig.update_traces(marker=dict(size=9, opacity=0.8))
+            fig.update_traces(marker=dict(size=9, opacity=0.8), textposition='top center')
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Strategic Interpretation Guide
         with st.expander("💡 How to Read the Territory Density Heatmap & Spot 'White Spaces'"):
             st.markdown("""
-            * **🔥 Dark / Warm Density Hubs:** High concentration of existing SKUs. These zones present **cannibalization risks** and are prime candidates for product rationalization or consolidation.
-            * **⚪ Pale / Low-Density Zones:** **"White Spaces"** representing unserved or sparse olfactive profile combinations. These zones highlight **New Product Development (NPD) opportunities** for unique new launches.
+            * **🔥 Dark / Warm Density Hubs:** High concentration of existing SKUs. These zones present **cannibalization risks** and are prime candidates for portfolio consolidation.
+            * **⚪ Pale / Low-Density Zones:** **"White Spaces"** representing unserved olfactive profiles. These zones highlight **New Product Development (NPD)** launch opportunities.
             """)
 
         if method == "PCA":
             with st.expander("🔍 What is driving these axes? (PCA Feature Importance)"):
-                col_a, col_b = st.columns(2)
-                with col_a:
+                col_a_p, col_b_p = st.columns(2)
+                with col_a_p:
                     st.write("**Top Drivers for Dimension 1 (Horizontal):**")
                     st.write(", ".join(pc1_drivers.index))
-                with col_b:
+                with col_b_p:
                     st.write("**Top Drivers for Dimension 2 (Vertical):**")
                     st.write(", ".join(pc2_drivers.index))
 
-    # --- TAB 2: Clusters & Heroes ---
+    # =========================================================================
+    # --- TAB 2: Objective Clustering & Olfactive Signatures ---
+    # =========================================================================
     with tab2:
         st.header("2. Objective Clustering & Olfactive Signatures")
         st.markdown("Group fragrances into olfactive families, identify their dominant notes, and select cluster heroes.")
         
-        max_clusters = min(20, len(df))
+        max_clusters = min(20, len(df_feat))
         n_clusters = st.slider("Number of Clusters (Families):", min_value=2, max_value=max_clusters, value=min(8, max_clusters))
         
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         clusters = kmeans.fit_predict(data_scaled)
         
-        # Identify Heroes (closest product to centroid)
+        # Identify Heroes (closest product to cluster centroid)
         closest, _ = pairwise_distances_argmin_min(kmeans.cluster_centers_, data_scaled)
-        heroes = df.index[closest].tolist()
+        heroes_codes = df_feat.index[closest].tolist()
         
         # Compute cluster average profiles
-        df_clustered = df.copy()
+        df_clustered = df_feat.copy()
         df_clustered["Cluster"] = clusters
         cluster_means = df_clustered.groupby("Cluster").mean()
         
-        # Build Rich Cluster Summary Table
+        # Build Cluster Summary Table (Includes Col A, B, C, D & ODNA Family)
         cluster_summary = []
         for c_id in range(n_clusters):
             c_size = (clusters == c_id).sum()
-            c_hero = heroes[c_id]
-            # Get top 4 dominant notes in cluster
+            hero_code = heroes_codes[c_id]
+            hero_meta = df_meta.loc[hero_code]
+            
             top_c_notes = cluster_means.loc[c_id].nlargest(4)
             sig_str = ", ".join([f"{k} ({v:.1f})" for k, v in top_c_notes.items() if v > 0])
             
             cluster_summary.append({
                 "Cluster ID": c_id,
                 "Size": c_size,
-                "Hero Fragrance": c_hero,
+                "Hero Code (A)": hero_code,
+                "Fantasy Name (D)": hero_meta[col_d],
+                "Group Code (B)": hero_meta[col_b],
+                "Brand Name (C)": hero_meta[col_c],
+                "ODNA Family": hero_meta["ODNA Family"],
                 "Olfactive Signature (Dominant Notes)": sig_str
             })
             
         summary_df = pd.DataFrame(cluster_summary)
-        
         st.write("### Cluster Signatures & Representative Heroes")
         st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
-        # Plot clusters on the 2D landscape
+        # Plot clusters on the 2D landscape - ONLY Random Codes on chart labels
         viz_df["Cluster"] = clusters.astype(str)
         fig_clusters = px.scatter(
-            viz_df, x="Dim 1", y="Dim 2", color="Cluster", hover_name=df.index.name,
-            hover_data={"Top Notes": True, "Cluster": True, "Dim 1": False, "Dim 2": False},
+            viz_df, x="Dim 1", y="Dim 2", color="Cluster", text=col_a,
+            hover_data={"Fantasy Name": True, "Brand Name": True, "ODNA Family": True, "Top Notes": True, "Cluster": True, "Dim 1": False, "Dim 2": False},
             title=f"Fragrance Territory Clusters (k={n_clusters})"
         )
-        fig_clusters.update_traces(marker=dict(size=9))
+        fig_clusters.update_traces(marker=dict(size=9), textposition="top center")
         
-        # Add stars for heroes
-        hero_coords = viz_df[viz_df[df.index.name].isin(heroes)]
+        # Add stars for heroes (Labelled strictly with Random Code)
+        hero_coords = viz_df[viz_df[col_a].isin(heroes_codes)]
         fig_clusters.add_trace(go.Scatter(
             x=hero_coords["Dim 1"], y=hero_coords["Dim 2"],
             mode='markers+text',
             marker=dict(symbol='star', size=16, color='black', line=dict(width=1, color='white')),
-            text=hero_coords[df.index.name],
+            text=hero_coords[col_a],  # ONLY Random Code displayed
             textposition="top center",
             name='Heroes',
-            hovertext=hero_coords["Top Notes"]
+            hovertext=hero_coords["Fantasy Name"] + " (" + hero_coords["ODNA Family"] + ")"
         ))
         
         st.plotly_chart(fig_clusters, use_container_width=True)
 
-        # --- Interactive Cluster Inspector ---
+        # Deep Dive: Cluster Olfactive Fingerprint
         st.subheader("📊 Deep Dive: Cluster Olfactive Fingerprint")
-        selected_c = st.selectbox("Select a Cluster to inspect:", range(n_clusters), format_func=lambda x: f"Cluster {x} (Hero: {heroes[x]})")
+        selected_c = st.selectbox("Select a Cluster to inspect:", range(n_clusters), format_func=lambda x: f"Cluster {x} (Hero: {heroes_codes[x]})")
         
         c_col1, c_col2 = st.columns([1, 1])
         
         with c_col1:
-            # Radar chart of top 6 notes for this cluster vs overall average
             top_6_notes = cluster_means.loc[selected_c].nlargest(6)
-            overall_means = df.mean()[top_6_notes.index]
+            overall_means = df_feat.mean()[top_6_notes.index]
             
             fig_radar = go.Figure()
             fig_radar.add_trace(go.Scatterpolar(
@@ -264,40 +330,44 @@ if df is not None:
             
         with c_col2:
             st.write(f"**Fragrances in Cluster {selected_c}:**")
-            member_fragrances = df_clustered[df_clustered["Cluster"] == selected_c].index.tolist()
+            member_codes = df_clustered[df_clustered["Cluster"] == selected_c].index.tolist()
             
             member_details = []
-            for frag in member_fragrances:
+            for code in member_codes:
+                meta = df_meta.loc[code]
                 member_details.append({
-                    "Fragrance": frag,
-                    "Is Hero": "⭐ Yes" if frag == heroes[selected_c] else "No",
-                    "Top Notes": top_notes_series[frag]
+                    "Random Code (A)": code,
+                    "Fantasy Name (D)": meta[col_d],
+                    "Group Code (B)": meta[col_b],
+                    "Brand Name (C)": meta[col_c],
+                    "ODNA Family": meta["ODNA Family"],
+                    "Is Hero": "⭐ Yes" if code == heroes_codes[selected_c] else "No",
+                    "Top Notes": top_notes_series[code]
                 })
             st.dataframe(pd.DataFrame(member_details), hide_index=True, use_container_width=True)
 
-    # --- TAB 3: Network Map (Substitution Pathways) ---
+    # =========================================================================
+    # --- TAB 3: Fragrance Substitution Network Map ---
+    # =========================================================================
     with tab3:
         st.header("3. Fragrance Substitution Network Map")
-        st.markdown("This map reveals continuous substitution pathways. Fragrances connected by a line are highly similar.")
+        st.markdown("Reveals continuous substitution pathways. Nodes display strictly **Random Codes**.")
         
         threshold = st.slider("Similarity Threshold (0.0 to 1.0):", min_value=0.5, max_value=0.99, value=0.85, step=0.01,
                               help="Higher values mean fewer connections (stricter similarity requirement).")
         
-        # Build NetworkX Graph
         G = nx.Graph()
-        
-        for node in df.index:
+        for node in df_feat.index:
             G.add_node(node)
             
-        for i in range(len(df.index)):
-            for j in range(i+1, len(df.index)):
+        for i in range(len(df_feat.index)):
+            for j in range(i+1, len(df_feat.index)):
                 sim = sim_matrix[i, j]
                 if sim >= threshold:
-                    G.add_edge(df.index[i], df.index[j], weight=sim)
+                    G.add_edge(df_feat.index[i], df_feat.index[j], weight=sim)
                     
         pos = nx.spring_layout(G, seed=42)
         
-        # Edges
         edge_x, edge_y = [], []
         for edge in G.edges():
             x0, y0 = pos[edge[0]]
@@ -307,19 +377,24 @@ if df is not None:
             
         edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none', mode='lines')
         
-        # Nodes
         node_x, node_y, node_hover, node_adjacencies = [], [], [], []
-        
         for node in G.nodes():
             x, y = pos[node]
             node_x.append(x)
             node_y.append(y)
             n_conn = len(list(G.neighbors(node)))
             node_adjacencies.append(n_conn)
-            node_hover.append(f"<b>{node}</b><br>Connections: {n_conn}<br>Top Notes: {top_notes_series[node]}")
+            
+            meta = df_meta.loc[node]
+            node_hover.append(
+                f"<b>{node}</b><br>Fantasy: {meta[col_d]}<br>Brand: {meta[col_c]}<br>Family: {meta['ODNA Family']}<br>Connections: {n_conn}"
+            )
             
         node_trace = go.Scatter(
-            x=node_x, y=node_y, mode='markers', hoverinfo='text', hovertext=node_hover,
+            x=node_x, y=node_y, mode='markers+text',
+            text=list(G.nodes()),  # Displays ONLY Random Code
+            textposition="top center",
+            hoverinfo='text', hovertext=node_hover,
             marker=dict(
                 showscale=True,
                 colorscale='YlGnBu',
@@ -342,15 +417,15 @@ if df is not None:
                 yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
             )
         )
-        
         st.plotly_chart(fig_net, use_container_width=True)
 
+    # =========================================================================
     # --- TAB 4: Similarity Engine ---
+    # =========================================================================
     with tab4:
         st.header("4. Fragrance Similarity Engine")
         st.markdown("Select a target fragrance to locate its closest alternatives and evaluate substitution feasibility.")
         
-        # Collapsible Tier Definition Reference Table
         with st.expander("ℹ️ How to Interpret Olfactive Proximity Tiers"):
             tier_guide_df = pd.DataFrame([
                 {
@@ -380,31 +455,44 @@ if df is not None:
             ])
             st.dataframe(tier_guide_df, hide_index=True, use_container_width=True)
             
-        target = st.selectbox("Select Target Fragrance:", df.index)
+        target = st.selectbox("Select Target Fragrance (Random Code):", df_feat.index, 
+                            format_func=lambda x: f"{x} - {df_meta.loc[x, col_d]} ({df_meta.loc[x, col_c]})")
         top_n = st.number_input("Number of Alternatives to show:", min_value=1, max_value=20, value=5)
         
         if st.button("Find Alternatives"):
             target_sims = sim_df[target].drop(target).sort_values(ascending=False)
             top_alternatives = target_sims.head(top_n).reset_index()
-            top_alternatives.columns = ["Alternative Fragrance", "Proximity Score"]
+            top_alternatives.columns = ["Random Code (A)", "Proximity Score"]
             
-            # Apply tier classification and formatting
+            # Map metadata columns: Fantasy Name (D), Group Code (B), Brand Name (C), ODNA Family
+            top_alternatives["Fantasy Name (D)"] = top_alternatives["Random Code (A)"].map(df_meta[col_d])
+            top_alternatives["Group Code (B)"] = top_alternatives["Random Code (A)"].map(df_meta[col_b])
+            top_alternatives["Brand Name (C)"] = top_alternatives["Random Code (A)"].map(df_meta[col_c])
+            top_alternatives["ODNA Family"] = top_alternatives["Random Code (A)"].map(df_meta["ODNA Family"])
+            
+            # Formatting & Tiering
             top_alternatives["Tier Status"] = top_alternatives["Proximity Score"].apply(classify_proximity)
             top_alternatives["Proximity Match"] = (top_alternatives["Proximity Score"] * 100).round(1).astype(str) + "%"
-            top_alternatives["Top Notes"] = top_alternatives["Alternative Fragrance"].map(top_notes_series)
+            top_alternatives["Top Notes"] = top_alternatives["Random Code (A)"].map(top_notes_series)
+            
+            output_cols = [
+                "Random Code (A)", "Fantasy Name (D)", "Group Code (B)", 
+                "Brand Name (C)", "ODNA Family", "Tier Status", "Proximity Match", "Top Notes"
+            ]
             
             st.dataframe(
-                top_alternatives[["Alternative Fragrance", "Tier Status", "Proximity Match", "Top Notes"]], 
+                top_alternatives[output_cols], 
                 hide_index=True, 
                 use_container_width=True
             )
             
-            # Olfactive profile comparison chart
-            comp_df = df.loc[[target] + top_alternatives["Alternative Fragrance"].tolist()].T
-            comp_df = comp_df.loc[(comp_df != 0).any(axis=1)] # Filter non-zero descriptors
+            # Comparison Chart across non-zero characterizer notes
+            comp_codes = [target] + top_alternatives["Random Code (A)"].tolist()
+            comp_df = df_feat.loc[comp_codes].T
+            comp_df = comp_df.loc[(comp_df != 0).any(axis=1)]
             
-            st.write("### Olfactive Profile Comparison")
+            st.write("### Olfactive Characterizer Profile Comparison")
             st.line_chart(comp_df)
 
 else:
-    st.info("Please upload the 'Example ODNA.xls' file in the sidebar to begin.")
+    st.info("Please upload your workbook (containing 'characterizer' and 'Family' tabs) in the sidebar to begin.")
