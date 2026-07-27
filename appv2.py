@@ -10,6 +10,14 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import pairwise_distances_argmin_min
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+# Safe import for WordCloud with fallback
+try:
+    from wordcloud import WordCloud
+    HAS_WORDCLOUD = True
+except ImportError:
+    HAS_WORDCLOUD = False
 
 # --- Page Config ---
 st.set_page_config(page_title="Fragrance Portfolio Rationalizer", layout="wide")
@@ -133,11 +141,12 @@ if df_feat is not None:
     sim_df = pd.DataFrame(sim_matrix, index=df_feat.index, columns=df_feat.index)
 
     # --- UI TABS ---
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Olfactive Landscape", 
         "Clusters & Heroes", 
         "Network Map", 
-        "Similarity Engine"
+        "Similarity Engine",
+        "Portfolio Optimization"
     ])
 
     # =========================================================================
@@ -236,11 +245,11 @@ if df_feat is not None:
                     st.write(", ".join(pc2_drivers.index))
 
     # =========================================================================
-    # --- TAB 2: Objective Clustering & Olfactive Signatures (Option A: Barycenter/Medoid) ---
+    # --- TAB 2: Objective Clustering, Olfactive Signatures & Word Cloud ---
     # =========================================================================
     with tab2:
         st.header("2. Objective Clustering & Olfactive Signatures")
-        st.markdown("Group fragrances into olfactive families using **Option A: Cluster Barycenter / Medoid** selection.")
+        st.markdown("Group fragrances into olfactive families using **Cluster Barycenter / Medoid** selection.")
         
         max_clusters = min(20, len(df_feat))
         n_clusters = st.slider("Number of Clusters (Families):", min_value=2, max_value=max_clusters, value=min(8, max_clusters))
@@ -248,7 +257,7 @@ if df_feat is not None:
         kmeans = KMeans(n_clusters=n_clusters, random_state=42)
         clusters = kmeans.fit_predict(data_scaled)
         
-        # --- Option A: Strictly Find Intra-Cluster Medoid (Closest SKU to Centroid within Cluster) ---
+        # --- Find Intra-Cluster Medoid (Closest SKU to Centroid within Cluster) ---
         heroes_codes = []
         hero_distances = []
         
@@ -326,7 +335,7 @@ if df_feat is not None:
         st.plotly_chart(fig_clusters, use_container_width=True)
 
         # Deep Dive: Cluster Olfactive Fingerprint
-        st.subheader("📊 Deep Dive: Cluster Olfactive Fingerprint")
+        st.subheader("📊 Deep Dive: Cluster Olfactive Fingerprint & Word Cloud")
         selected_c = st.selectbox("Select a Cluster to inspect:", range(n_clusters), format_func=lambda x: f"Cluster {x} (Hero: {heroes_codes[x]})")
         
         c_col1, c_col2 = st.columns([1, 1])
@@ -365,6 +374,37 @@ if df_feat is not None:
                     "Top Notes": top_notes_series[code]
                 })
             st.dataframe(pd.DataFrame(member_details), hide_index=True, use_container_width=True)
+
+        # --- Interactive Olfactive Notes Word Cloud Section ---
+        st.markdown("---")
+        st.subheader("☁️ Olfactive Descriptors Word Cloud")
+        wc_scope = st.radio("Select Word Cloud Scope:", ["Whole Portfolio", f"Cluster {selected_c} Only"], horizontal=True)
+
+        if wc_scope == "Whole Portfolio":
+            weights = df_feat.sum().to_dict()
+            wc_title = "Portfolio Olfactive Notes Frequency"
+        else:
+            weights = df_clustered[df_clustered["Cluster"] == selected_c][df_feat.columns].sum().to_dict()
+            wc_title = f"Cluster {selected_c} Olfactive Notes Frequency"
+
+        weights = {k: float(v) for k, v in weights.items() if v > 0}
+
+        if weights:
+            if HAS_WORDCLOUD:
+                wc = WordCloud(width=800, height=350, background_color="white", colormap="PuRd").generate_from_frequencies(weights)
+                fig_wc, ax = plt.subplots(figsize=(10, 4))
+                ax.imshow(wc, interpolation="bilinear")
+                ax.axis("off")
+                st.pyplot(fig_wc)
+                plt.close(fig_wc)
+            else:
+                top_wc_df = pd.Series(weights).nlargest(20).reset_index()
+                top_wc_df.columns = ["Descriptor", "Intensity Weight"]
+                fig_wc = px.bar(top_wc_df, x="Intensity Weight", y="Descriptor", orientation="h", title=wc_title)
+                fig_wc.update_layout(yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_wc, use_container_width=True)
+        else:
+            st.info("No non-zero characterizer weights available for the selected scope.")
 
     # =========================================================================
     # --- TAB 3: Fragrance Substitution Network Map ---
@@ -510,6 +550,104 @@ if df_feat is not None:
             
             st.write("### Olfactive Characterizer Profile Comparison")
             st.line_chart(comp_df)
+
+    # =========================================================================
+    # --- TAB 5: Portfolio Optimization & Strategic Rationalization ---
+    # =========================================================================
+    with tab5:
+        st.header("5. Strategic Portfolio Optimization Engine")
+        st.markdown("Decision support tool to eliminate SKU overlap and formulate target briefs for unserved olfactive territory.")
+
+        opt_feature = st.radio(
+            "Choose Portfolio Optimization Tool:",
+            [
+                "⚡ Feature 1: Cannibalization & Redundancy Risk Detector (SKU Consolidation)",
+                "🎯 Feature 2: White Space & NPD Target Opportunity Finder (R&D Briefs)"
+            ],
+            horizontal=False
+        )
+
+        st.markdown("---")
+
+        if "Feature 1" in opt_feature:
+            st.subheader("⚡ Feature 1: Cannibalization & Redundancy Risk Detector")
+            st.markdown("Scans the portfolio for highly overlapping SKU pairs that cannibalize sales and recommends rationalization candidates.")
+
+            cann_thresh = st.slider("Select Cannibalization Overlap Threshold:", min_value=0.70, max_value=0.98, value=0.82, step=0.01)
+
+            overlap_pairs = []
+            n_skus = len(df_feat.index)
+            for i in range(n_skus):
+                for j in range(i + 1, n_skus):
+                    score = sim_matrix[i, j]
+                    if score >= cann_thresh:
+                        code1, code2 = df_feat.index[i], df_feat.index[j]
+                        overlap_pairs.append({
+                            "SKU 1 (Code)": code1,
+                            "SKU 1 Name": df_meta.loc[code1, col_d],
+                            "SKU 1 Brand": df_meta.loc[code1, col_c],
+                            "SKU 2 (Code)": code2,
+                            "SKU 2 Name": df_meta.loc[code2, col_d],
+                            "SKU 2 Brand": df_meta.loc[code2, col_c],
+                            "Similarity Score": f"{score * 100:.1f}%",
+                            "Raw Sim": score,
+                            "Strategic Action": "⚠️ High Overlap — Consolidate or Differentiate"
+                        })
+
+            if overlap_pairs:
+                df_overlap = pd.DataFrame(overlap_pairs).sort_values(by="Raw Sim", ascending=False).drop(columns=["Raw Sim"])
+                st.warning(f"Identified {len(df_overlap)} redundant SKU pair(s) exceeding {cann_thresh*100:.0f}% similarity.")
+                st.dataframe(df_overlap, hide_index=True, use_container_width=True)
+            else:
+                st.success(f"No duplicate SKU pairs found above {cann_thresh*100:.0f}% similarity. Portfolio has clean olfactive boundaries.")
+
+        else:
+            st.subheader("🎯 Feature 2: White Space & NPD Target Opportunity Finder")
+            st.markdown("Discovers unserved olfactive territory and generates target synthetic briefs for New Product Development (NPD).")
+
+            n_gaps = st.slider("Number of Target White Spaces to Spot:", min_value=1, max_value=5, value=3)
+
+            gap_kmeans = KMeans(n_clusters=n_clusters + n_gaps, random_state=42).fit(data_scaled)
+            centroids = gap_kmeans.cluster_centers_
+
+            # Compute isolation distances
+            dists_to_real = pairwise_distances_argmin_min(centroids, data_scaled)[1]
+            top_gap_indices = np.argsort(dists_to_real)[-n_gaps:]
+
+            white_spaces = []
+            for rank, idx in enumerate(top_gap_indices, 1):
+                centroid_unscaled = scaler.inverse_transform(centroids[idx].reshape(1, -1))[0]
+                centroid_unscaled = np.maximum(0, centroid_unscaled)
+                top_notes = pd.Series(centroid_unscaled, index=df_feat.columns).nlargest(5)
+                top_notes = top_notes[top_notes > 0]
+                
+                profile_str = ", ".join([f"{k} ({v:.1f})" for k, v in top_notes.items()])
+                
+                white_spaces.append({
+                    "Target Opportunity": f"White Space Opportunity #{rank}",
+                    "Olfactive Isolation Distance": f"{dists_to_real[idx]:.2f}",
+                    "Recommended Core Descriptors (NPD Brief)": profile_str
+                })
+
+            st.dataframe(pd.DataFrame(white_spaces), hide_index=True, use_container_width=True)
+
+            st.markdown("### 📊 R&D Target Profile Brief Visualizer")
+            ws_selected = st.selectbox("Select White Space Opportunity to inspect:", [ws["Target Opportunity"] for ws in white_spaces])
+            
+            ws_idx = int(ws_selected.split("#")[-1]) - 1
+            gap_centroid_idx = top_gap_indices[ws_idx]
+            unscaled_profile = np.maximum(0, scaler.inverse_transform(centroids[gap_centroid_idx].reshape(1, -1))[0])
+            top_8_descriptors = pd.Series(unscaled_profile, index=df_feat.columns).nlargest(8)
+
+            fig_ws = px.bar(
+                x=top_8_descriptors.values,
+                y=top_8_descriptors.index,
+                orientation='h',
+                labels={'x': 'Target Intensity Weight', 'y': 'Characterizer Descriptor'},
+                title=f"Target Olfactive Brief: {ws_selected}"
+            )
+            fig_ws.update_layout(yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_ws, use_container_width=True)
 
 else:
     st.info("Please upload your workbook (containing 'characterizer' and 'Family' tabs) in the sidebar to begin.")
